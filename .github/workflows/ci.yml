@@ -5,7 +5,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel: false
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Checkout
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Install prerequisites
         run: |
@@ -26,13 +26,13 @@ jobs:
           ./scripts/feeds install -a
 
       - name: Download source
-        run: make download -j$(nproc)
+        run: make download -j$(nproc) V=s
 
       - name: Compile firmware
-        run: make -j$(nproc)
+        run: make -j$(nproc) V=s
 
       - name: Upload firmware
-        uses: actions/upload-artifact@main
+        uses: actions/upload-artifact@v4
         with:
           name: Firmware
           path: bin/
@@ -42,12 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download
-        uses: actions/download-artifact@main
+        uses: actions/download-artifact@v4
         with:
           name: Firmware
           path: ./bin
 
       - name: Release
-        uses: softprops/action-gh-release@master
+        uses: softprops/action-gh-release@v1
         with:
           files: ./bin/**/*.bin
