@@ -1,8 +1,9 @@
-name: Build Openfirmware
+name: Build OpenWrt Redmi AX3000 Optimized
 
 on:
   workflow_dispatch:
 
+# 杜绝0秒取消、杜绝抢任务卡死
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -12,48 +13,54 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - name: Checkout code
+      - name: 检出完整源码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install full build dependencies (修复核心：补全所有OpenWrt必需依赖)
-        run: |
-          sudo apt update && sudo apt full-upgrade -y
-          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
-          libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
-          libssl-dev libtool libxml2-utils lzma make mingw-w64 ncurses-dev p7zip patch python3 python3-pip \
-          python3-pyelftools python3-setuptools rsync scons squashfs-tools subversion swig texinfo uglifyjs \
-          unzip wget xml-utils xsltproc zlib1g-dev file
+      - name: 缓存编译加速(大幅缩短下次时间)
+        uses: actions/cache@v3
+        with:
+          path: |
+            .ccache
+            feeds
+            dl
+          key: ${{ runner.os }}-openwrt-ipq50xx-${{ github.sha }}
 
-      - name: Update & Install feeds (修复核心：先更新源再安装依赖)
+      - name 安装完整官方编译依赖(补齐所有缺库)
         run: |
+          sudo apt update -y
+          sudo apt install -y build-essential flex bison gawk python3 python3-pip unzip \
+          libncurses-dev libssl-dev device-tree-compiler git ccache curl wget file rsync \
+          libelf-dev uuid-dev lib32gcc-s1 libc6-dev-i386
+
+      - name: 初始化Feeds纯净流程
+        run: |
+          ./scripts/feeds clean
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Generate Redmi AX3000 default config (修复核心：生成目标设备配置)
+      - name: 纯净生成配置(不瞎改、不冲突)
         run: |
-          make defconfig
-          # 强制指定Redmi AX3000 IPQ50xx目标，避免配置错误
-          sed -i 's/CONFIG_TARGET_.*=y//g' .config
-          echo "CONFIG_TARGET_ipq50xx=y" >> .config
-          echo "CONFIG_TARGET_ipq50xx_generic=y" >> .config
-          echo "CONFIG_TARGET_ipq50xx_generic_DEVICE_redmi_ax3000=y" >> .config
-          echo "CONFIG_PACKAGE_luci=y" >> .config
+          rm -f .config .config.old
           make defconfig
 
-      - name: Download all source packages (修复核心：先下载再编译，避免网络中断)
-        run: make -j$(nproc) download V=s
+      - name: 预下载全部源码(防止中途断网失败)
+        run: make download -j$(nproc) V=s
 
-      - name: Compile firmware
-        run: make -j$(nproc) V=s
+      - name: 开启CCache加速编译
+        run: |
+          export CCACHE_DIR=$GITHUB_WORKSPACE/.ccache
+          ccache -M 10G
+          ccache -s
 
-      - name: Upload firmware
+      - name: 正式编译(稳版多核)
+        run: make -j$(($(nproc)-1)) V=s
+
+      - name: 上传成品固件bin
         uses: actions/upload-artifact@v4
         with:
-          name: Firmware
+          name: RedmiAX3000-Firmware
           path: bin/targets/ipq50xx/generic/*.bin
 
   release:
@@ -61,13 +68,12 @@ jobs:
     runs-on: ubuntu-latest
     if: success()
     steps:
-      - name: Download artifacts
+      - name: 下载固件
         uses: actions/download-artifact@v4
         with:
-          name: Firmware
-          path: ./bin
+          name: RedmiAX3000-Firmware
 
-      - name: Create Release
+      - name: 自动打包发布
         uses: softprops/action-gh-release@v1
         with:
-          files: ./bin/**/*.bin
+          files: *.bin
