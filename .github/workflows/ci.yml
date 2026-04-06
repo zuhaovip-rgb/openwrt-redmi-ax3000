@@ -27,7 +27,7 @@ jobs:
             dl
           key: ${{ runner.os }}-openwrt-ipq50xx-${{ github.sha }}
 
-      - name 安装完整官方编译依赖(补齐所有缺库)
+      - name: 安装完整官方编译依赖(补齐所有缺库)
         run: |
           sudo apt update -y
           sudo apt install -y build-essential flex bison gawk python3 python3-pip unzip \
@@ -76,4 +76,4 @@ jobs:
       - name: 自动打包发布
         uses: softprops/action-gh-release@v1
         with:
-          files: *.bin
+          files: "*.bin"
