@@ -1,195 +1,89 @@
-name: CI
+name: Build OpenWrt for Redmi AX3000 (IPQ50xx)
 
+# 触发方式：手动触发（可按需添加push自动触发）
 on:
   workflow_dispatch:
-  push:
+    inputs:
+      branch:
+        description: "编译分支"
+        default: "ipq50xx-mainline-kernel-5.15-openwrt-23.05"
+        required: true
+      defconfig:
+        description: "是否使用默认配置"
+        default: "false"
+        required: false
+
+# 🔴 核心修复：关闭并发抢占，禁止新任务取消正在运行的任务
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
+    # 🔴 核心修复：设置最大超时6小时（符合GitHub免费Runner限制，避免无限排队）
+    timeout-minutes: 360
     steps:
-      - name: Free disk space
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 0
+
+      - name: 安装编译依赖
         run: |
-          # 强化了清理力度，确保 IPQ50xx 编译空间充足
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
-          sudo docker image prune -a -f
+          sudo apt update && sudo apt full-upgrade -y
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+          libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
+          libssl-dev libtool libxml2-utils lzma make mingw-w64 ncurses-dev p7zip patch python3 python3-pip \
+          python3-pyelftools python3-setuptools rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+          unzip wget xml-utils xsltproc zlib1g-dev file
 
-      - name: Install dependencies
+      - name: 初始化编译环境
         run: |
-          sudo apt update
-          sudo apt install -y build-essential clang flex g++ gawk gcc-multilib gettext \
-            git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
-            swig libpython3-dev libelf-dev zstd # 补充了高通平台必备依赖
-
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Hook the openwrt_core URL for opkg
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          OWNER="${GITHUB_REPOSITORY%%/*}"
-          REPO="${GITHUB_REPOSITORY#*/}"
-          # 增加了 Authorization 头，防止原始代码中的 curl 被 GitHub API 拒绝
-          TIME="$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
-
-          echo "ci-$(date -d "${TIME}" -u +'%Y%m%d-%H%M%S')-${GITHUB_SHA:0:8}" >version
-          # 增加判断，防止 include 目录不存在时报错
-          [ -f include/feeds.mk ] && sed -i "s|%U/targets/%S/packages|https://${OWNER}.github.io/${REPO}/${GITHUB_REF_NAME}/%R|" include/feeds.mk || echo "skip sed"
-
-      - name: Update and install feeds
-        run: |
-          chmod +x scripts/feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure
+      - name: 加载自定义配置（.config）
         run: |
-          cat <<EOF | sed -E 's/^  //' >.config
-            CONFIG_TARGET_ipq50xx=y
-            CONFIG_TARGET_ipq50xx_arm=y
-            CONFIG_TARGET_MULTI_PROFILE=y
-            CONFIG_TARGET_ALL_PROFILES=y
-            CONFIG_TARGET_PER_DEVICE_ROOTFS=y
-
-            CONFIG_IB=y
-            # CONFIG_IB_STANDALONE is not set
-            CONFIG_SDK=y
-            CONFIG_MAKE_TOOLCHAIN=y
-
-            CONFIG_ALL_NONSHARED=y
-            CONFIG_REPRODUCIBLE_DEBUG_INFO=y
-
-            CONFIG_PACKAGE_luci=y
-          EOF
-          make defconfig
-
-      - name: Download
-        run: |
-          make -j16 download || make -j1 download
-
-      - name: Build tools
-        run: |
-          make -j$(nproc) tools/install || make -j1 tools/install V=s
-
-      - name: Build toolchain
-        run: |
-          make -j$(nproc) toolchain/install || make -j1 toolchain/install V=s
-
-      - name: Build all
-        run: |
-          make -j$(nproc) IGNORE_ERRORS=1 || make -j1 IGNORE_ERRORS=1 V=s
-
-      - name: Upload bin to artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: bin-ipq50xx-arm
-          path: bin/targets/ipq50xx/arm/*
-
-      - name: Upload dl to artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: dl
-          path: dl/*
-
-  gh-pages:
-    needs: [ build ]
-    runs-on: ubuntu-20.04
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout gh-pages
-        uses: actions/checkout@v3
-        with:
-          path: 'gh-pages'
-          ref: 'gh-pages'
-          fetch-depth: 0
-        continue-on-error: true
-
-      - name: Configure the git user
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-      - name: Drop old versions
-        run: |
-          cd gh-pages
-          # 检查是否有提交记录，防止第一次运行失败
-          if git log -1 > /dev/null 2>&1; then
-            readarray -t old_version < <(git log --format='%h' -- "${GITHUB_REF_NAME}" | tail -n +10 2>/dev/null || true)
-            if [ ${#old_version[@]} -gt 0 ]; then
-              GIT_SEQUENCE_EDITOR="sed -i '1 i break'" git rebase --interactive --committer-date-is-author-date --root
-              for commit in "${old_version[@]}"; do
-                sed -i "/${commit}/d" .git/rebase-merge/git-rebase-todo
-              done
-              git rebase --continue
-            fi
+          # 若你有自定义.config，直接放在仓库根目录，这里会自动加载
+          if [ -f .config ]; then
+            echo "加载自定义.config"
+            cat .config > .config
+          else
+            echo "生成默认配置"
+            make defconfig
           fi
 
-      - name: Download bin from artifacts
-        uses: actions/download-artifact@v3
+      - name: 下载所有源码包（避免编译中断）
+        run: make -j$(nproc) download V=s
+
+      - name: 正式编译固件
+        run: make -j$(nproc) V=s
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
         with:
-          name: bin-ipq50xx-arm
-          path: bin/
+          name: openwrt-redmi-ax3000-firmware
+          path: bin/targets/ipq50xx/generic/*.bin
 
-      - name: Copy contents
-        run: |
-          # 修复了路径匹配问题
-          versioninfo=$(find bin/ -name "version.buildinfo" | head -n 1)
-          version=$(cat "$versioninfo" 2>/dev/null || echo "unknown")
-          mkdir -p "gh-pages/${GITHUB_REF_NAME}/${version}/"
-          [ -d bin/packages ] && cp -avr bin/packages/* "gh-pages/${GITHUB_REF_NAME}/${version}/" || echo "no packages"
-
-      - name: Commit
-        run: |
-          cd gh-pages
-          git add .
-          git commit -m "Add: ${GITHUB_REF_NAME} build" || exit 0
-
-      - name: Publish
-        run: |
-          cd gh-pages
-          git push -f origin gh-pages
-
+  # 可选：编译成功后自动发布Release
   release:
-    needs: [ build ]
-    runs-on: ubuntu-20.04
-    permissions:
-      contents: write
+    needs: build
+    runs-on: ubuntu-latest
+    if: success()
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v3
+      - name: 下载编译产物
+        uses: actions/download-artifact@v4
         with:
-          path: fetched_artifacts/
+          name: openwrt-redmi-ax3000-firmware
+          path: firmware
 
-      - name: Tar
-        run: |
-          # 重新调整了打包路径逻辑
-          tar cvf dl.tar -C fetched_artifacts/dl/ . || touch dl.tar
-          tar cvf bin-ipq50xx.tar -C fetched_artifacts/bin-ipq50xx-arm/ . || touch bin-ipq50xx.tar
-
-      - name: Generate release informations
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TIME="$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
-          TAG="ci-${GITHUB_REF_NAME}-$(date -d "${TIME}" +'%Y%m%d-%H%M')"
-          echo "TAG=$TAG" >>$GITHUB_ENV
-
-          echo "CI ${GITHUB_REF_NAME} Build" > Release.md
-          echo "Build time: $(date)" >> Release.md
-          echo "NAME=Release ${TAG}" >>$GITHUB_ENV
-
-      - name: Release
+      - name: 自动创建Release
         uses: softprops/action-gh-release@v1
         with:
-          prerelease: true
-          tag_name: ${{ env.TAG }}
-          name: ${{ env.NAME }}
-          body_path: Release.md
-          files: |
-            *.tar
-            fetched_artifacts/bin-ipq50xx-arm/sha256sums
+          tag_name: v${{ github.sha }}
+          name: OpenWrt Redmi AX3000 ${{ github.sha }}
+          files: firmware/*.bin
